@@ -1,8 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { onAuthStateChanged, signInWithPopup, signOut } from 'firebase/auth';
-import { doc, getDoc, setDoc, Timestamp } from 'firebase/firestore';
-import { firebaseAuth, firestoreDb, googleProvider } from './firebase';
+import { firebaseApp, firebaseAuth, googleProvider } from './firebase';
 import './styles.css';
 
 const iconPaths = {
@@ -45,9 +44,14 @@ const dateFromKey = key => new Date(`${key}T12:00:00`);
 const todayKey = () => dateKey(new Date());
 const shortDate = date => new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric' }).format(date);
 const fullDate = key => new Intl.DateTimeFormat('en', { weekday: 'long', month: 'long', day: 'numeric' }).format(dateFromKey(key));
-const expirationDate = () => Timestamp.fromDate(new Date(Date.now() + 60 * 24 * 60 * 60 * 1000));
+const expirationDate = () => new Date(Date.now() + 60 * 24 * 60 * 60 * 1000);
 const userCacheKey = uid => `nourish-v3-user-${uid}`;
 const settingsCacheKey = uid => `nourish-v3-settings-${uid}`;
+let firestoreServicesPromise;
+const firestoreServices = () => {
+  if (!firestoreServicesPromise) firestoreServicesPromise = import('firebase/firestore').then(module => ({ ...module, database: module.getFirestore(firebaseApp) }));
+  return firestoreServicesPromise;
+};
 
 function buildGoals(profile) {
   const weight = Number(profile.weight) || 60;
@@ -80,6 +84,29 @@ function recentOnly(items, key = 'date') {
   return items.filter(item => !item[key] || item[key] >= cutoffKey);
 }
 
+function compressMealPhoto(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Could not read this image.'));
+    reader.onload = () => {
+      const image = new Image();
+      image.onerror = () => reject(new Error('This image format is not supported.'));
+      image.onload = () => {
+        const maximumSide = 1024;
+        const scale = Math.min(1, maximumSide / Math.max(image.width, image.height));
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(1, Math.round(image.width * scale));
+        canvas.height = Math.max(1, Math.round(image.height * scale));
+        const context = canvas.getContext('2d');
+        context.drawImage(image, 0, 0, canvas.width, canvas.height);
+        resolve({ data: canvas.toDataURL('image/jpeg', 0.8), type: 'image/jpeg' });
+      };
+      image.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 function App() {
   const [screen, setScreen] = useState('home');
   const [selectedDate, setSelectedDate] = useState(todayKey());
@@ -103,6 +130,7 @@ function App() {
   const calorieTarget = Number(settings.calorieGoal) || goals?.calories || 2000;
 
   useEffect(() => onAuthStateChanged(firebaseAuth, async authUser => {
+    setAuthReady(false);
     setFirebaseUser(authUser);
     setCloudReady(false);
     if (!authUser) {
@@ -124,10 +152,29 @@ function App() {
     let savedSettings = cached.settings || getStore(settingsCacheKey(authUser.uid), {});
     let savedGoals = cached.goals || null;
 
+    const hydrateAccount = (account, accountSettings, accountGoals) => {
+      const loadedEntries = recentOnly(Array.isArray(account.entries) ? account.entries : []).map(entry => ({ ...entry, date: entry.date || todayKey() }));
+      const loadedWeights = recentOnly(Array.isArray(account.weights) ? account.weights : []);
+      const loadedWater = typeof account.water === 'number' ? { [todayKey()]: account.water } : (account.water || {});
+      setEntries(loadedEntries);
+      setWater(loadedWater);
+      setWeights(loadedWeights);
+      setDailyNotes(account.dailyNotes || (typeof account.dailyNote === 'string' && account.dailyNote ? { [todayKey()]: account.dailyNote } : {}));
+      setPeriod(account.period || { lastPeriod: '', cycle: 28 });
+      setGoals(accountGoals || null);
+      setSettings(accountSettings || {});
+    };
+
+    // Render the signed-in account immediately from its private device cache.
+    // Firestore then refreshes the same state in the background without blocking the UI.
+    hydrateAccount(cached, savedSettings, savedGoals);
+    setAuthReady(true);
+
     try {
+      const { doc, getDoc, database } = await firestoreServices();
       const [wellnessSnapshot, preferencesSnapshot] = await Promise.all([
-        getDoc(doc(firestoreDb, 'users', authUser.uid, 'wellness', 'current')),
-        getDoc(doc(firestoreDb, 'users', authUser.uid, 'preferences', 'current')),
+        getDoc(doc(database, 'users', authUser.uid, 'wellness', 'current')),
+        getDoc(doc(database, 'users', authUser.uid, 'preferences', 'current')),
       ]);
       if (wellnessSnapshot.exists()) saved = { ...cached, ...wellnessSnapshot.data() };
       if (preferencesSnapshot.exists()) {
@@ -140,18 +187,8 @@ function App() {
       }
     } catch { /* Account-specific local data remains available while offline. */ }
 
-    const loadedEntries = recentOnly(Array.isArray(saved.entries) ? saved.entries : []).map(entry => ({ ...entry, date: entry.date || todayKey() }));
-    const loadedWeights = recentOnly(Array.isArray(saved.weights) ? saved.weights : []);
-    const loadedWater = typeof saved.water === 'number' ? { [todayKey()]: saved.water } : (saved.water || {});
-    setEntries(loadedEntries);
-    setWater(loadedWater);
-    setWeights(loadedWeights);
-    setDailyNotes(saved.dailyNotes || (typeof saved.dailyNote === 'string' && saved.dailyNote ? { [todayKey()]: saved.dailyNote } : {}));
-    setPeriod(saved.period || { lastPeriod: '', cycle: 28 });
-    setGoals(savedGoals);
-    setSettings(savedSettings || {});
+    hydrateAccount(saved, savedSettings, savedGoals);
     setCloudReady(true);
-    setAuthReady(true);
   }), []);
 
   useEffect(() => {
@@ -166,22 +203,22 @@ function App() {
       cutoff.setDate(cutoff.getDate() - 60);
       const cutoffKey = dateKey(cutoff);
       const cloudWater = Object.fromEntries(Object.entries(water).filter(([key]) => key >= cutoffKey));
-      Promise.all([
-        setDoc(doc(firestoreDb, 'users', firebaseUser.uid, 'wellness', 'current'), {
+      firestoreServices().then(({ doc, setDoc, database }) => Promise.all([
+        setDoc(doc(database, 'users', firebaseUser.uid, 'wellness', 'current'), {
           entries: cloudEntries,
           water: cloudWater,
           weights: cloudWeights,
           dailyNotes,
           period,
-          updatedAt: Timestamp.now(),
+          updatedAt: new Date(),
           expireAt: expirationDate(),
         }),
-        setDoc(doc(firestoreDb, 'users', firebaseUser.uid, 'preferences', 'current'), {
+        setDoc(doc(database, 'users', firebaseUser.uid, 'preferences', 'current'), {
           settings,
           goals,
-          updatedAt: Timestamp.now(),
+          updatedAt: new Date(),
         }),
-      ]).catch(() => {});
+      ])).catch(() => {});
     }, 700);
     return () => clearTimeout(saveTimer);
   }, [firebaseUser, cloudReady, entries, water, weights, dailyNotes, period, goals, settings]);
@@ -204,7 +241,7 @@ function App() {
     await signOut(firebaseAuth);
   }
 
-  if (!authReady || (firebaseUser && !cloudReady)) {
+  if (!authReady) {
     return <div className="app-shell"><main className="phone auth-loading"><div className="brand-mark">n</div><strong>Preparing your private journal…</strong><span>Syncing your meals, goals, settings, and check-ins.</span></main></div>;
   }
   if (!firebaseUser) return <Login required/>;
@@ -212,7 +249,7 @@ function App() {
   return <div className="app-shell">
     <main className="phone">
       <header className="topbar">
-        <div className="top-title"><span>{screen === 'home' ? (selectedDate === todayKey() ? 'Today' : shortDate(dateFromKey(selectedDate))) : 'Weight Tracker'}</span><small>Hello, {user?.name?.split(' ')[0] || 'there'}</small></div>
+        <div className="top-title"><span>{screen === 'home' ? (selectedDate === todayKey() ? 'Today' : shortDate(dateFromKey(selectedDate))) : 'Weight Tracker'}</span><small>{cloudReady ? `Hello, ${user?.name?.split(' ')[0] || 'there'}` : 'Syncing your account…'}</small></div>
         <div className="top-actions">
           <button className="icon-button" aria-label="Open private health" onClick={() => setHealthOpen(true)}><Icon name="heart" size={18}/></button>
           <button className="icon-button" aria-label="Open settings" onClick={() => setSettingsOpen(true)}><Icon name="gear" size={18}/></button>
@@ -248,7 +285,7 @@ function App() {
 
     {settingsOpen && <Settings settings={settings} setSettings={setSettings} user={user} onClose={() => setSettingsOpen(false)}/>}
     {healthOpen && <HealthJournal dailyNote={dailyNotes[todayKey()] || ''} setDailyNote={value => setDailyNotes(previous => ({ ...previous, [todayKey()]: value }))} period={period} setPeriod={setPeriod} onClose={() => setHealthOpen(false)}/>}
-    {!goals && <GoalSetup onSave={saveGoal}/>}
+    {cloudReady && !goals && <GoalSetup onSave={saveGoal}/>}
   </div>;
 }
 
@@ -332,33 +369,86 @@ function MealJournal({ date, entries, addEntry, updateEntry, deleteEntry, settin
   const [photo, setPhoto] = useState(null);
   const [menuId, setMenuId] = useState(null);
   const [editingId, setEditingId] = useState(null);
+  const [macroEditor, setMacroEditor] = useState(null);
   const cameraRef = useRef(null);
   const galleryRef = useRef(null);
 
-  useEffect(() => { setEditingId(null); setText(''); setPhoto(null); setMenuId(null); }, [date]);
+  useEffect(() => { setEditingId(null); setMacroEditor(null); setText(''); setPhoto(null); setMenuId(null); }, [date]);
 
   async function googleEstimate() {
     if (!settings.apiKey) throw new Error('Add your Gemini API key in Settings before logging a meal.');
-    const parts = [{ text: `You are Nourish's nutrition logger. Extract a realistic nutrition estimate from the user's meal message and/or image. Reply ONLY with valid JSON in this exact shape: {"title":"", "calories":0, "carbs":0, "protein":0, "fat":0}. Use grams for carbohydrates, protein, and fat. User meal message: ${text || 'No text provided; identify the meal from the image.'}` }];
+    const nutritionPrompt = `You are an evidence-focused nutrition analyst. Estimate the nutrition for exactly the food and portion shown or described by the user.
+
+RESEARCH RULES:
+- Use Google Search before answering when the meal names a brand, packaged product, restaurant, recipe, regional dish, or an item whose serving nutrition can be verified online.
+- Prefer an official manufacturer or restaurant nutrition page. Otherwise prefer a national food-composition source such as USDA FoodData Central, then a reputable nutrition database.
+- Do not use search snippets blindly. Reconcile the source serving size with the user's stated or visually estimated portion.
+
+ESTIMATION RULES:
+- Read every stated quantity, unit, ingredient, cooking method, sauce, oil, drink, and visible side dish.
+- For an image, identify all visible foods and estimate edible portion sizes conservatively. Do not assume unseen ingredients.
+- For a mixed homemade meal, estimate the components separately and add them.
+- Calories must be consistent with the returned carbohydrates, protein, and fat (approximately 4/4/9 kcal per gram), while allowing normal label rounding and fibre differences.
+- If quantity is missing, use one typical serving and clearly state that assumption in "basis".
+- Never return zero for a visible or described food unless that nutrient is genuinely negligible.
+
+Return ONLY one valid JSON object with this exact shape and no markdown:
+{"title":"short meal name","serving":"portion analysed","calories":0,"carbs":0,"protein":0,"fat":0,"basis":"one short sentence describing the serving/source or estimation basis"}
+
+User meal: ${text.trim() || 'No text was provided. Identify and analyse the complete meal from the attached image.'}`;
+    const parts = [{ text: nutritionPrompt }];
     if (photo) parts.push({ inlineData: { mimeType: photo.type, data: photo.data.split(',')[1] } });
-    const model = settings.model || 'gemini-3-flash-preview';
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${settings.apiKey}`, {
+    const model = settings.model || 'gemini-3.5-flash';
+    const generationConfig = { temperature: 0.1 };
+    if (model.startsWith('gemini-3')) {
+      generationConfig.responseMimeType = 'application/json';
+      generationConfig.responseSchema = {
+        type: 'OBJECT',
+        properties: {
+          title: { type: 'STRING' },
+          serving: { type: 'STRING' },
+          calories: { type: 'NUMBER' },
+          carbs: { type: 'NUMBER' },
+          protein: { type: 'NUMBER' },
+          fat: { type: 'NUMBER' },
+          basis: { type: 'STRING' },
+        },
+        required: ['title', 'serving', 'calories', 'carbs', 'protein', 'fat', 'basis'],
+      };
+    }
+    const requestEstimate = useSearch => fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${settings.apiKey}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contents: [{ parts }], generationConfig: { responseMimeType: 'application/json', temperature: 0.2 } }),
+      body: JSON.stringify({ contents: [{ parts }], ...(useSearch ? { tools: [{ google_search: {} }] } : {}), generationConfig }),
     });
+    let response = await requestEstimate(true);
+    if (!response.ok) {
+      const firstError = (await response.json().catch(() => null))?.error?.message || '';
+      const searchUnavailable = response.status === 400 || /google.?search|grounding|tool|billing/i.test(firstError);
+      if (searchUnavailable) response = await requestEstimate(false);
+      else throw new Error(firstError || 'Gemini could not analyse this meal.');
+    }
     if (!response.ok) {
       const message = (await response.json().catch(() => null))?.error?.message;
       throw new Error(message || 'Gemini could not analyse this meal.');
     }
-    const raw = (await response.json()).candidates?.[0]?.content?.parts?.[0]?.text || '{}';
-    const data = JSON.parse(raw.replace(/```json|```/g, '').trim());
+    const payload = await response.json();
+    const candidate = payload.candidates?.[0];
+    const raw = candidate?.content?.parts?.map(part => part.text || '').join('') || '{}';
+    const jsonText = raw.replace(/```json|```/g, '').match(/\{[\s\S]*\}/)?.[0] || '{}';
+    const data = JSON.parse(jsonText);
+    const cleanNumber = value => Math.max(0, Math.round(Number(value) || 0));
+    const sources = (candidate?.groundingMetadata?.groundingChunks || []).map(chunk => chunk.web).filter(source => source?.uri?.startsWith('https://') && source?.title).slice(0, 3);
     return {
       title: data.title || text || 'Photo meal',
-      calories: Number(data.calories) || 0,
-      carbs: Number(data.carbs) || 0,
-      protein: Number(data.protein) || 0,
-      fat: Number(data.fat) || 0,
+      serving: data.serving || 'Estimated serving',
+      calories: cleanNumber(data.calories),
+      carbs: cleanNumber(data.carbs),
+      protein: cleanNumber(data.protein),
+      fat: cleanNumber(data.fat),
+      basis: data.basis || 'Estimated from the described or visible serving.',
+      grounded: Boolean(candidate?.groundingMetadata?.webSearchQueries?.length || sources.length),
+      sources,
     };
   }
 
@@ -379,19 +469,30 @@ function MealJournal({ date, entries, addEntry, updateEntry, deleteEntry, settin
     } finally { setBusy(false); }
   }
 
-  function onPhoto(event) {
+  async function onPhoto(event) {
     const file = event.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => setPhoto({ data: reader.result, type: file.type || 'image/jpeg' });
-    reader.readAsDataURL(file);
     event.target.value = '';
+    try { setPhoto(await compressMealPhoto(file)); }
+    catch (error) { alert(error.message || 'Could not prepare this image.'); }
   }
   function editEntry(entry) {
     setMenuId(null);
     setEditingId(entry.id);
     setText(entry.text || '');
     setPhoto(entry.photo ? { data: entry.photo, type: entry.photoType || 'image/jpeg' } : null);
+  }
+  function editMacros(entry) {
+    setMenuId(null);
+    setMacroEditor({ id: entry.id, calories: entry.data?.calories ?? 0, carbs: entry.data?.carbs ?? 0, protein: entry.data?.protein ?? 0, fat: entry.data?.fat ?? 0 });
+  }
+  function saveMacros() {
+    if (!macroEditor) return;
+    const entry = entries.find(item => item.id === macroEditor.id);
+    if (!entry) { setMacroEditor(null); return; }
+    const cleanNumber = value => Math.max(0, Math.round(Number(value) || 0));
+    updateEntry(entry.id, { data: { ...entry.data, calories: cleanNumber(macroEditor.calories), carbs: cleanNumber(macroEditor.carbs), protein: cleanNumber(macroEditor.protein), fat: cleanNumber(macroEditor.fat), manuallyEdited: true } });
+    setMacroEditor(null);
   }
 
   return <section className="meal-section">
@@ -401,17 +502,18 @@ function MealJournal({ date, entries, addEntry, updateEntry, deleteEntry, settin
         <div className="entry-icon">{entry.photo ? <img src={entry.photo} alt="Meal"/> : <Icon name="flame" size={17}/>}</div>
         <div className="entry-title"><h3>{entry.data?.title || 'Meal'}</h3><p>{entry.time || 'Saved meal'}</p></div>
         <div className="entry-calories"><strong>{entry.data?.calories || 0}</strong><span>Calories</span></div>
-        <div className="entry-menu"><button aria-label="Meal options" onClick={() => setMenuId(menuId === entry.id ? null : entry.id)}><Icon name="more" size={20}/></button>{menuId === entry.id && <div><button onClick={() => editEntry(entry)}><Icon name="pencil" size={15}/> Edit message</button><button className="danger" onClick={() => { setMenuId(null); deleteEntry(entry.id); }}><Icon name="trash" size={15}/> Delete entry</button></div>}</div>
+        <div className="entry-menu"><button aria-label="Meal options" onClick={() => setMenuId(menuId === entry.id ? null : entry.id)}><Icon name="more" size={20}/></button>{menuId === entry.id && <div><button onClick={() => editEntry(entry)}><Icon name="pencil" size={15}/> Edit meal & reanalyse</button><button onClick={() => editMacros(entry)}><Icon name="chart" size={15}/> Edit extracted macros</button><button className="danger" onClick={() => { setMenuId(null); deleteEntry(entry.id); }}><Icon name="trash" size={15}/> Delete entry</button></div>}</div>
       </div>
       {entry.photo && <img className="entry-photo" src={entry.photo} alt={entry.data?.title || 'Logged meal'}/>}
       <p className="entry-message">{entry.text}</p>
-      <div className="entry-result"><span><Icon name="magic" size={13}/> GEMINI EXTRACTED</span><div><b>Calories <strong>{entry.data?.calories || 0} kcal</strong></b><b>Carbohydrates <strong>{entry.data?.carbs || 0}g</strong></b><b>Protein <strong>{entry.data?.protein || 0}g</strong></b><b>Fat <strong>{entry.data?.fat || 0}g</strong></b></div></div>
+      <div className="entry-result"><span><Icon name="magic" size={13}/> {entry.data?.manuallyEdited ? 'MANUALLY ADJUSTED' : entry.data?.grounded ? 'GEMINI + GOOGLE SEARCH' : 'GEMINI ESTIMATE'}</span><div><b>Calories <strong>{entry.data?.calories || 0} kcal</strong></b><b>Carbohydrates <strong>{entry.data?.carbs || 0}g</strong></b><b>Protein <strong>{entry.data?.protein || 0}g</strong></b><b>Fat <strong>{entry.data?.fat || 0}g</strong></b></div>{entry.data?.basis && <p className="nutrition-basis">{entry.data.serving ? `${entry.data.serving} · ` : ''}{entry.data.basis}</p>}{entry.data?.sources?.length > 0 && <div className="nutrition-sources">{entry.data.sources.map((source, index) => <a key={`${source.uri}-${index}`} href={source.uri} target="_blank" rel="noreferrer">{source.title}</a>)}</div>}</div>
     </article>)}</div>}
 
     <div className="composer-space"/>
     <div className="composer-dock">
       {photo && <div className="photo-preview"><img src={photo.data} alt="Selected meal"/><button onClick={() => setPhoto(null)}><Icon name="close" size={13}/></button></div>}
       {editingId && <div className="edit-banner"><span>Editing meal — Gemini will recalculate it.</span><button onClick={() => { setEditingId(null); setText(''); setPhoto(null); }}>Cancel</button></div>}
+      {busy && <div className="analysis-status"><span className="spinner"/> Checking the meal and nutrition sources…</div>}
       <div className="composer">
         <input value={text} onChange={event => setText(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') submit(); }} placeholder="What did you eat?"/>
         <button aria-label="Choose meal photo" onClick={() => galleryRef.current?.click()}><Icon name="image" size={19}/></button>
@@ -421,6 +523,7 @@ function MealJournal({ date, entries, addEntry, updateEntry, deleteEntry, settin
         <input hidden ref={galleryRef} type="file" accept="image/*" onChange={onPhoto}/>
       </div>
     </div>
+    {macroEditor && <div className="macro-edit-layer"><section className="macro-editor"><header><div><span>MANUAL CORRECTION</span><h3>Edit extracted macros</h3></div><button aria-label="Close macro editor" onClick={() => setMacroEditor(null)}><Icon name="close" size={17}/></button></header><p>Correct Gemini's estimate. Saving updates the selected day's totals immediately.</p><div className="macro-edit-grid"><label><span>Calories</span><div><input type="number" min="0" inputMode="numeric" value={macroEditor.calories} onChange={event => setMacroEditor(previous => ({ ...previous, calories: event.target.value }))}/><b>kcal</b></div></label><label><span>Carbohydrates</span><div><input type="number" min="0" inputMode="numeric" value={macroEditor.carbs} onChange={event => setMacroEditor(previous => ({ ...previous, carbs: event.target.value }))}/><b>g</b></div></label><label><span>Protein</span><div><input type="number" min="0" inputMode="numeric" value={macroEditor.protein} onChange={event => setMacroEditor(previous => ({ ...previous, protein: event.target.value }))}/><b>g</b></div></label><label><span>Fat</span><div><input type="number" min="0" inputMode="numeric" value={macroEditor.fat} onChange={event => setMacroEditor(previous => ({ ...previous, fat: event.target.value }))}/><b>g</b></div></label></div><div className="macro-edit-actions"><button onClick={() => setMacroEditor(null)}>Cancel</button><button onClick={saveMacros}>Save changes</button></div></section></div>}
   </section>;
 }
 
@@ -482,7 +585,7 @@ function Settings({ settings, setSettings, user, onClose }) {
       <p className="help-text">Use your own Gemini API to analyse meal messages and photos.</p>
       {!draft.apiKey && <section className="api-guide"><span>ONE-TIME SETUP</span><strong>Connect Gemini AI</strong><ol><li>Open Google AI Studio below and sign in.</li><li>Choose <b>Create API key</b> and copy it.</li><li>Paste it here, choose a model, then save.</li></ol><a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer">Open Google AI Studio</a></section>}
       <label className="field"><span>Google AI API key</span><input type="password" value={draft.apiKey || ''} onChange={event => setDraft({ ...draft, apiKey: event.target.value.trim() })} placeholder="Paste your API key"/></label>
-      <label className="field"><span>Model</span><select value={draft.model || 'gemini-3-flash-preview'} onChange={event => setDraft({ ...draft, model: event.target.value })}><option value="gemini-3.5-flash">Gemini 3.5 Flash</option><option value="gemini-3-flash-preview">Gemini 3 Flash Preview</option><option value="gemini-3.1-flash-lite">Gemini 3.1 Flash-Lite</option><option value="gemini-2.5-flash">Gemini 2.5 Flash</option></select></label>
+      <label className="field"><span>Model</span><select value={draft.model || 'gemini-3.5-flash'} onChange={event => setDraft({ ...draft, model: event.target.value })}><option value="gemini-3.5-flash">Gemini 3.5 Flash — recommended</option><option value="gemini-3-flash-preview">Gemini 3 Flash Preview</option><option value="gemini-3.1-flash-lite">Gemini 3.1 Flash-Lite</option><option value="gemini-2.5-flash">Gemini 2.5 Flash</option></select></label>
       <p className="security-note"><Icon name="check" size={15}/> Your API setting is saved to your private Firebase account and restored when you sign in again.</p>
       <button className="primary-button" onClick={save}>Save settings</button>
     </div>
