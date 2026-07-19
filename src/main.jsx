@@ -37,6 +37,7 @@ const todayKey = () => new Date().toISOString().slice(0, 10);
 const shortDate = d => new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric' }).format(d);
 const expirationDate = () => Timestamp.fromDate(new Date(Date.now() + 60 * 24 * 60 * 60 * 1000));
 const userCacheKey = uid => `nourish-v3-user-${uid}`;
+const settingsCacheKey = uid => `nourish-v3-settings-${uid}`;
 const challengeDates = Array.from({ length: 21 }, (_, offset) => {
   const date = new Date(); date.setDate(date.getDate() - (20 - offset)); return date;
 });
@@ -60,7 +61,7 @@ function App() {
   const [entries, setEntries] = useState(() => getStore('nourish-v2-entries', []));
   const [water, setWater] = useState(() => getStore('nourish-v2-water', 0));
   const [weights, setWeights] = useState(() => getStore('nourish-v2-weights', []));
-  const [settings, setSettings] = useState(() => getStore('nourish-settings', {}));
+  const [settings, setSettings] = useState({});
   const [user, setUser] = useState(() => getStore('nourish-v2-user', null));
   const [dailyNote, setDailyNote] = useState(() => getStore('nourish-v2-note', ''));
   const [period, setPeriod] = useState(() => getStore('nourish-v2-period', { lastPeriod: '', cycle: 28 }));
@@ -76,7 +77,7 @@ function App() {
   useEffect(() => localStorage.setItem('nourish-v2-entries', JSON.stringify(entries)), [entries]);
   useEffect(() => localStorage.setItem('nourish-v2-water', JSON.stringify(water)), [water]);
   useEffect(() => localStorage.setItem('nourish-v2-weights', JSON.stringify(weights)), [weights]);
-  useEffect(() => localStorage.setItem('nourish-settings', JSON.stringify(settings)), [settings]);
+  useEffect(() => { if (firebaseUser) localStorage.setItem(settingsCacheKey(firebaseUser.uid), JSON.stringify(settings)); }, [firebaseUser, settings]);
   useEffect(() => localStorage.setItem('nourish-v2-user', JSON.stringify(user)), [user]);
   useEffect(() => localStorage.setItem('nourish-v2-note', JSON.stringify(dailyNote)), [dailyNote]);
   useEffect(() => localStorage.setItem('nourish-v2-period', JSON.stringify(period)), [period]);
@@ -90,6 +91,7 @@ function App() {
       // Hide any previous device cache while loading this account's private record.
       setEntries([]); setWater(0); setWeights([]); setDailyNote(''); setPeriod({ lastPeriod: '', cycle: 28 }); setGoals(null);
       setUser({ name: authUser.displayName || 'Nourish user', email: authUser.email || '', picture: authUser.photoURL || '' });
+      setSettings(getStore(settingsCacheKey(authUser.uid), getStore('nourish-settings', {})));
       const cached = getStore(userCacheKey(authUser.uid), null);
       let saved = cached;
       try {
