@@ -62,16 +62,20 @@ button:disabled { cursor: not-allowed; }
 .date-strip button span { font-size: 9px; }
 .date-strip button strong { color: #d7dadb; font: 700 13px 'Manrope', sans-serif; }
 .date-strip button i { position: absolute; bottom: 3px; width: 4px; height: 4px; border-radius: 50%; background: transparent; }
-.date-strip button.complete i { background: var(--green); }
-.date-strip button.missed i { background: #d85e58; }
-.date-strip button.selected { border-color: #7a3b17; background: #382318; }
-.date-strip button.selected span, .date-strip button.selected strong { color: var(--orange-light); }
+.date-strip button.today { background: #e8c55f; }
+.date-strip button.complete { background: #69ae7d; }
+.date-strip button.missed { background: #c85e59; }
+.date-strip button.today span, .date-strip button.today strong,
+.date-strip button.complete span, .date-strip button.complete strong,
+.date-strip button.missed span, .date-strip button.missed strong { color: #141718; }
+.date-strip button.selected { border-color: #f7f0eb; box-shadow: 0 0 0 1px #f7f0eb; }
 
 .page-intro { display: flex; align-items: end; justify-content: space-between; gap: 16px; padding: 27px 2px 17px; }
 .page-intro > div:first-child > span, .weight-hero > span, .section-heading span, .forecast-card > span, .trend-summary span, .api-guide > span, .goal-setup > span { color: var(--orange-light); font: 600 10px/1.4 'JetBrains Mono', monospace; letter-spacing: .08em; }
 .page-intro h1, .weight-hero h1, .login-panel h1, .goal-setup h2 { margin: 4px 0 0; font: 800 28px/1.08 'Manrope', sans-serif; letter-spacing: -.04em; }
-.streak-note { display: grid; grid-template-columns: 6px auto 6px auto; align-items: center; gap: 4px; color: #8f9799; font-size: 8px; }
+.streak-note { display: grid; grid-template-columns: 6px auto 6px auto 6px auto; align-items: center; gap: 4px; color: #8f9799; font-size: 8px; }
 .streak-note i { width: 6px; height: 6px; border-radius: 50%; }
+.today-dot { background: #e8c55f; }
 .complete-dot { background: var(--green); }
 .missed-dot { margin-left: 3px; background: #d85e58; }
 

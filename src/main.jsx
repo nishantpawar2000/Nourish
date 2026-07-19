@@ -274,8 +274,9 @@ function DateStrip({ selectedDate, setSelectedDate, allEntries, goals }) {
     const totals = totalsFor(allEntries.filter(entry => (entry.date || todayKey()) === key));
     const complete = totals.protein >= (goals?.protein || 120) && totals.carbs >= (goals?.carbs || 220) && totals.fat >= (goals?.fat || 67);
     if (complete) return 'complete';
+    if (key === todayKey()) return 'today';
     if (key < todayKey()) return 'missed';
-    return '';
+    return 'future';
   }
   return <div className="date-strip">{dates.map(date => {
     const key = dateKey(date);
@@ -302,7 +303,7 @@ function Home({ selectedDate, setSelectedDate, entries, allEntries, addEntry, up
 
     <div className="page-intro">
       <div><span>DAILY OVERVIEW</span><h1>{selectedDate === todayKey() ? 'Fuel your day.' : fullDate(selectedDate)}</h1></div>
-      <div className="streak-note"><i className="complete-dot"/><span>Goal met</span><i className="missed-dot"/><span>Missed</span></div>
+      <div className="streak-note"><i className="today-dot"/><span>Today</span><i className="complete-dot"/><span>Goal met</span><i className="missed-dot"/><span>Missed</span></div>
     </div>
 
     {!settings.apiKey && <button className="connect-ai" onClick={onNeedApi}><Icon name="magic" size={17}/><span><strong>Connect Gemini AI</strong><small>Add your API key once to analyse meals.</small></span><Icon name="plus" size={16}/></button>}
