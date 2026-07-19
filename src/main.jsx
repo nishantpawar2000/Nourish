@@ -36,6 +36,7 @@ const getStore = (key, fallback) => { try { return JSON.parse(localStorage.getIt
 const todayKey = () => new Date().toISOString().slice(0, 10);
 const shortDate = d => new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric' }).format(d);
 const expirationDate = () => Timestamp.fromDate(new Date(Date.now() + 60 * 24 * 60 * 60 * 1000));
+const userCacheKey = uid => `nourish-v3-user-${uid}`;
 const challengeDates = Array.from({ length: 21 }, (_, offset) => {
   const date = new Date(); date.setDate(date.getDate() - (20 - offset)); return date;
 });
@@ -89,9 +90,11 @@ function App() {
       // Hide any previous device cache while loading this account's private record.
       setEntries([]); setWater(0); setWeights([]); setDailyNote(''); setPeriod({ lastPeriod: '', cycle: 28 }); setGoals(null);
       setUser({ name: authUser.displayName || 'Nourish user', email: authUser.email || '', picture: authUser.photoURL || '' });
+      const cached = getStore(userCacheKey(authUser.uid), null);
+      let saved = cached;
       try {
         const snapshot = await getDoc(doc(firestoreDb, 'users', authUser.uid, 'wellness', 'current'));
-        const saved = snapshot.exists() ? snapshot.data() : null;
+        if (snapshot.exists()) { const remote = snapshot.data(); saved = { ...cached, ...remote, goals: remote.goals || cached?.goals || null }; }
         if (!cancelled && saved) {
           if (Array.isArray(saved.entries)) setEntries(saved.entries);
           if (typeof saved.water === 'number') setWater(saved.water);
@@ -106,6 +109,9 @@ function App() {
   }, []);
   useEffect(() => {
     if (!firebaseUser || !cloudReady) return;
+    const wellnessState = { entries, water, weights, dailyNote, period, goals };
+    // Keep an account-specific device cache immediately, including when a user logs out quickly.
+    localStorage.setItem(userCacheKey(firebaseUser.uid), JSON.stringify(wellnessState));
     const timeout = setTimeout(() => {
       setDoc(doc(firestoreDb, 'users', firebaseUser.uid, 'wellness', 'current'), {
         // Meal images are intentionally excluded: Firestore documents have a 1 MiB limit.
@@ -184,7 +190,7 @@ function Settings({ settings, setSettings, user, onClose, onLogin }) { const [dr
 function Login({ setUser, onClose, onSignedIn, required = false }) {
   const [notice, setNotice] = useState(''); const [busy, setBusy] = useState(false);
   async function signIn() { if (busy) return; setBusy(true); setNotice(''); try { const result = await signInWithPopup(firebaseAuth, googleProvider); const firebaseUser = result.user; setUser({ name: firebaseUser.displayName || 'Nourish user', email: firebaseUser.email || '', picture: firebaseUser.photoURL || '' }); onSignedIn(); } catch (error) { setNotice(error.code === 'auth/unauthorized-domain' ? 'This domain is not approved in Firebase Authentication. Add it under Authentication → Settings → Authorized domains.' : 'Google sign-in could not be completed. Please try again.'); } finally { setBusy(false); } }
-  return <div className="modal-layer login-layer"><section className="login-panel">{!required && <button className="modal-close" onClick={onClose}><Icon name="close"/></button>}<div className="brand-mark big">n</div><span>PERSONALISE NOURISH</span><h2>Meet your<br/><em>wellness journal.</em></h2><p>Sign in with Google to create a private, device-remembered wellness journal.</p><button className="google-button" disabled={busy} onClick={signIn}><b>G</b> {busy ? 'Opening Google…' : 'Continue with Google'}</button>{notice && <p className="login-notice">{notice}</p>}<small>Your Google name, email, and profile photo personalise this journal. You can log out anytime from your profile photo.</small></section></div>;
+  return <div className="modal-layer login-layer"><section className="login-panel">{!required && <button className="modal-close" onClick={onClose}><Icon name="close"/></button>}<div className="brand-mark big">n</div><span>PERSONALISE NOURISH</span><h2>Meet your<br/><em>wellness journal.</em></h2><p>Sign in with Google to create a private, device-remembered wellness journal.</p><button className="google-button" disabled={busy} onClick={signIn}><b>G</b> {busy ? 'Opening Google…' : 'Continue with Google'}</button>{notice && <p className="login-notice">{notice}</p>}</section></div>;
 }
 function HealthJournal({ dailyNote, setDailyNote, period, setPeriod, onClose }) { return <div className="modal-layer"><section className="settings-panel health-panel"><header><button onClick={onClose}><Icon name="back"/></button><h2>Private health</h2><span/></header><div className="settings-body"><div className="health-intro"><Icon name="heart" size={22}/><div><strong>Just for you</strong><p>These private notes are intentionally kept outside the main navigation.</p></div></div><h3>Daily journal</h3><p className="help-text">{new Date().toLocaleDateString('en', { weekday: 'long', month: 'long', day: 'numeric' })}</p><textarea className="daily-note" value={dailyNote} onChange={e => setDailyNote(e.target.value)} placeholder="How do you feel today? Write anything you want to remember…"/><h3>Period tracker</h3><label className="field"><span>First day of your last period</span><input type="date" value={period.lastPeriod} onChange={e => setPeriod({ ...period, lastPeriod: e.target.value })}/></label><label className="field"><span>Typical cycle length</span><div><input type="number" value={period.cycle} onChange={e => setPeriod({ ...period, cycle: e.target.value })}/><b>days</b></div></label>{period.lastPeriod && <div className="period-card"><Icon name="calendar"/><div><span>Estimated next period</span><strong>{shortDate(new Date(new Date(`${period.lastPeriod}T00:00:00`).getTime() + Number(period.cycle || 28) * 86400000))}</strong></div></div>}<button className="save-button" onClick={onClose}>Save private journal</button></div></section></div>; }
 function GoalSetup({ onSave }) {
