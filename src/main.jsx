@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { onAuthStateChanged, signInWithPopup } from 'firebase/auth';
+import { onAuthStateChanged, signInWithPopup, signOut } from 'firebase/auth';
 import { doc, getDoc, setDoc, Timestamp } from 'firebase/firestore';
 import { firebaseAuth, firestoreDb, googleProvider } from './firebase';
 import './styles.css';
@@ -64,11 +64,13 @@ function App() {
   const [dailyNote, setDailyNote] = useState(() => getStore('nourish-v2-note', ''));
   const [period, setPeriod] = useState(() => getStore('nourish-v2-period', { lastPeriod: '', cycle: 28 }));
   const [goals, setGoals] = useState(() => getStore('nourish-v2-goals', null));
-  const [firebaseUser, setFirebaseUser] = useState(null);
+  const [firebaseUser, setFirebaseUser] = useState(undefined);
+  const [authReady, setAuthReady] = useState(false);
   const [cloudReady, setCloudReady] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [healthOpen, setHealthOpen] = useState(false);
   const [loginOpen, setLoginOpen] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
   const totals = useMemo(() => entries.reduce((sum, item) => ({ calories: sum.calories + item.data.calories, carbs: sum.carbs + item.data.carbs, protein: sum.protein + item.data.protein, fat: sum.fat + item.data.fat }), { calories: 0, carbs: 0, protein: 0, fat: 0 }), [entries]);
   useEffect(() => localStorage.setItem('nourish-v2-entries', JSON.stringify(entries)), [entries]);
   useEffect(() => localStorage.setItem('nourish-v2-water', JSON.stringify(water)), [water]);
@@ -83,7 +85,9 @@ function App() {
     return onAuthStateChanged(firebaseAuth, async authUser => {
       if (cancelled) return;
       setFirebaseUser(authUser); setCloudReady(false);
-      if (!authUser) return;
+      if (!authUser) { setUser(null); setAuthReady(true); return; }
+      // Hide any previous device cache while loading this account's private record.
+      setEntries([]); setWater(0); setWeights([]); setDailyNote(''); setPeriod({ lastPeriod: '', cycle: 28 }); setGoals(null);
       setUser({ name: authUser.displayName || 'Nourish user', email: authUser.email || '', picture: authUser.photoURL || '' });
       try {
         const snapshot = await getDoc(doc(firestoreDb, 'users', authUser.uid, 'wellness', 'current'));
@@ -97,7 +101,7 @@ function App() {
           if (saved.goals) setGoals(saved.goals);
         }
       } catch { /* Production rules may not be published yet; local mode remains available. */ }
-      finally { if (!cancelled) setCloudReady(true); }
+      finally { if (!cancelled) { setCloudReady(true); setAuthReady(true); } }
     });
   }, []);
   useEffect(() => {
@@ -113,8 +117,12 @@ function App() {
     return () => clearTimeout(timeout);
   }, [firebaseUser, cloudReady, entries, water, weights, dailyNote, period, goals]);
   function addEntry(item) { setEntries(previous => [...previous, item]); }
+  async function handleLogout() { setProfileOpen(false); setSettingsOpen(false); await signOut(firebaseAuth); }
+  if (!authReady || (firebaseUser && !cloudReady)) return <div className="app-shell"><main className="phone auth-loading"><div className="brand-mark">n</div><strong>Preparing your private journal…</strong><span>Keeping your wellness data separate and secure.</span></main></div>;
+  if (!firebaseUser) return <><div className="app-shell"><main className="phone"/></div><Login required setUser={setUser} onSignedIn={() => { setLoginOpen(false); setSettingsOpen(true); }}/></>;
   return <div className="app-shell"><main className="phone">
-    <header className="topbar"><div className="brand-mark">n</div><div className="top-greeting"><span>{user ? `Hello, ${user.name.split(' ')[0]}` : 'Your daily wellness'}</span><strong>{user ? 'Welcome back' : 'Nourish your day'}</strong></div><button className="top-action" aria-label="Open settings" onClick={() => setSettingsOpen(true)}><Icon name="gear" size={18}/></button><button className="avatar-button" aria-label={user ? 'Open profile' : 'Sign in'} onClick={() => user ? setSettingsOpen(true) : setLoginOpen(true)}>{user?.picture ? <img src={user.picture} alt=""/> : <Icon name="user" size={19}/>}</button></header>
+    <header className="topbar"><div className="brand-mark">n</div><div className="top-greeting"><span>{user ? `Hello, ${user.name.split(' ')[0]}` : 'Your daily wellness'}</span><strong>{user ? 'Welcome back' : 'Nourish your day'}</strong></div><button className="top-action" aria-label="Open settings" onClick={() => setSettingsOpen(true)}><Icon name="gear" size={18}/></button><button className="avatar-button has-photo" aria-label="Open profile menu" onClick={() => setProfileOpen(true)}>{user?.picture ? <img src={user.picture} alt="Google profile"/> : <Icon name="user" size={19}/>}</button></header>
+    {profileOpen && <ProfileMenu user={user} onClose={() => setProfileOpen(false)} onLogout={handleLogout}/>} 
     {screen === 'home' && <Home totals={totals} goals={goals} water={water} setWater={setWater} entries={entries} weights={weights} setWeights={setWeights} setHealthOpen={setHealthOpen} onLogFood={() => setScreen('journal')}/>} 
     {screen === 'weight' && <WeightTracker weights={weights} setWeights={setWeights} goals={goals}/>} 
     {screen === 'journal' && <FoodJournal entries={entries} addEntry={addEntry} settings={settings}/>} 
@@ -128,6 +136,7 @@ function App() {
   </div>;
 }
 function NavButton({ active, name, label, onClick }) { return <button className={active ? 'active' : ''} onClick={onClick}><Icon name={name}/><span>{label}</span></button>; }
+function ProfileMenu({ user, onClose, onLogout }) { return <aside className="profile-menu"><button className="profile-menu-close" aria-label="Close profile menu" onClick={onClose}><Icon name="close" size={16}/></button><div className="profile-menu-user">{user?.picture ? <img src={user.picture} alt="Google profile"/> : <div>{user?.name?.[0] || 'N'}</div>}<section><strong>{user?.name || 'Nourish user'}</strong><span>{user?.email || ''}</span></section></div><button className="logout-button" onClick={onLogout}>Log out</button></aside>; }
 function Home({ totals, goals, water, setWater, entries, weights, setWeights, setHealthOpen, onLogFood }) {
   const [weightInput, setWeightInput] = useState(''); const latestWeight = weights.at(-1); const target = goals?.calories || 2000;
   function addWeight() { const kg = Number(weightInput); if (kg > 0) { setWeights([...weights, { kg, date: todayKey() }]); setWeightInput(''); } }
@@ -172,10 +181,10 @@ function Dashboard({ totals, goals, entries, weights }) {
   </section>;
 }
 function Settings({ settings, setSettings, user, onClose, onLogin }) { const [draft, setDraft] = useState(settings); function save() { setSettings(draft); onClose(); } return <div className="modal-layer"><section className="settings-panel"><header><button onClick={onClose}><Icon name="back"/></button><h2>Settings</h2><span/></header><div className="settings-body"><section className="profile-card"><div className="profile-initial">{user?.picture ? <img src={user.picture} alt=""/> : user?.name?.[0] || 'N'}</div><div><strong>{user?.name || 'Nourish account'}</strong><p>{user?.email || 'Sign in to personalise your journal.'}</p></div><button className="tiny-link" onClick={onLogin}>{user ? 'Switch' : 'Sign in'}</button></section><h3>Daily goal</h3><label className="field"><span>Calorie goal</span><div><input type="number" value={draft.calorieGoal || 2000} onChange={e => setDraft({ ...draft, calorieGoal: e.target.value })}/><b>kcal</b></div></label><h3 className="ai-heading"><Icon name="magic" size={16}/> Google AI</h3><p className="help-text">Analyse meal descriptions and photos using your own Google AI model.</p>{!draft.apiKey && <section className="api-guide"><div><span>STEP 2 OF 2</span><strong>Connect Gemini AI</strong></div><ol><li>Open Google AI Studio using the button below.</li><li>Sign in, then choose <b>Create API key</b>.</li><li>Choose or create a Google project and copy the key.</li><li>Return here, paste it below, choose a model, then save.</li></ol><a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer">Get a Gemini API key <Icon name="chevron" size={14}/></a><p>Your key stays in this browser. Never share it with anyone.</p></section>}<label className="field"><span>Google AI API key</span><input type="password" value={draft.apiKey || ''} onChange={e => setDraft({ ...draft, apiKey: e.target.value })} placeholder="Paste your API key here"/></label><label className="field"><span>Model</span><select value={draft.model || 'gemini-3-flash-preview'} onChange={e => setDraft({ ...draft, model: e.target.value })}><option value="gemini-3.5-flash">Gemini 3.5 Flash</option><option value="gemini-3-flash-preview">Gemini 3 Flash (Preview)</option><option value="gemini-3.1-flash-lite">Gemini 3.1 Flash-Lite</option><option value="gemini-2.5-flash">Gemini 2.5 Flash</option></select></label><h3>Google sign-in</h3><p className="security-note">Google sign-in is connected through Firebase Authentication. New users only need to press Continue with Google; no OAuth Client ID is required in this app.</p><button className="save-button" onClick={save}>Save settings</button></div></section></div>; }
-function Login({ setUser, onClose, onSignedIn }) {
+function Login({ setUser, onClose, onSignedIn, required = false }) {
   const [notice, setNotice] = useState(''); const [busy, setBusy] = useState(false);
   async function signIn() { if (busy) return; setBusy(true); setNotice(''); try { const result = await signInWithPopup(firebaseAuth, googleProvider); const firebaseUser = result.user; setUser({ name: firebaseUser.displayName || 'Nourish user', email: firebaseUser.email || '', picture: firebaseUser.photoURL || '' }); onSignedIn(); } catch (error) { setNotice(error.code === 'auth/unauthorized-domain' ? 'This domain is not approved in Firebase Authentication. Add it under Authentication → Settings → Authorized domains.' : 'Google sign-in could not be completed. Please try again.'); } finally { setBusy(false); } }
-  return <div className="modal-layer login-layer"><section className="login-panel"><button className="modal-close" onClick={onClose}><Icon name="close"/></button><div className="brand-mark big">n</div><span>PERSONALISE NOURISH</span><h2>Meet your<br/><em>wellness journal.</em></h2><p>Sign in with Google to use your exact account name and email in your private journal.</p><button className="google-button" disabled={busy} onClick={signIn}><b>G</b> {busy ? 'Opening Google…' : 'Continue with Google'}</button>{notice && <p className="login-notice">{notice}</p>}<small>After sign-in, Settings opens automatically so you can add your Google AI key.</small></section></div>;
+  return <div className="modal-layer login-layer"><section className="login-panel">{!required && <button className="modal-close" onClick={onClose}><Icon name="close"/></button>}<div className="brand-mark big">n</div><span>PERSONALISE NOURISH</span><h2>Meet your<br/><em>wellness journal.</em></h2><p>Sign in with Google to create a private, device-remembered wellness journal.</p><button className="google-button" disabled={busy} onClick={signIn}><b>G</b> {busy ? 'Opening Google…' : 'Continue with Google'}</button>{notice && <p className="login-notice">{notice}</p>}<small>Your Google name, email, and profile photo personalise this journal. You can log out anytime from your profile photo.</small></section></div>;
 }
 function HealthJournal({ dailyNote, setDailyNote, period, setPeriod, onClose }) { return <div className="modal-layer"><section className="settings-panel health-panel"><header><button onClick={onClose}><Icon name="back"/></button><h2>Private health</h2><span/></header><div className="settings-body"><div className="health-intro"><Icon name="heart" size={22}/><div><strong>Just for you</strong><p>These private notes are intentionally kept outside the main navigation.</p></div></div><h3>Daily journal</h3><p className="help-text">{new Date().toLocaleDateString('en', { weekday: 'long', month: 'long', day: 'numeric' })}</p><textarea className="daily-note" value={dailyNote} onChange={e => setDailyNote(e.target.value)} placeholder="How do you feel today? Write anything you want to remember…"/><h3>Period tracker</h3><label className="field"><span>First day of your last period</span><input type="date" value={period.lastPeriod} onChange={e => setPeriod({ ...period, lastPeriod: e.target.value })}/></label><label className="field"><span>Typical cycle length</span><div><input type="number" value={period.cycle} onChange={e => setPeriod({ ...period, cycle: e.target.value })}/><b>days</b></div></label>{period.lastPeriod && <div className="period-card"><Icon name="calendar"/><div><span>Estimated next period</span><strong>{shortDate(new Date(new Date(`${period.lastPeriod}T00:00:00`).getTime() + Number(period.cycle || 28) * 86400000))}</strong></div></div>}<button className="save-button" onClick={onClose}>Save private journal</button></div></section></div>; }
 function GoalSetup({ onSave }) {
