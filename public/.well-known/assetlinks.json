@@ -1,0 +1,12 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.nishantpawar.nourish",
+      "sha256_cert_fingerprints": [
+        "18:AF:66:79:DF:CC:DA:1C:4B:65:19:1F:F8:4E:68:8E:FE:E8:C1:6A:5F:8F:68:0D:FC:E9:90:35:5B:9E:28:2C"
+      ]
+    }
+  }
+]
